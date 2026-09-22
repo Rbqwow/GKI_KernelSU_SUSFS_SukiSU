@@ -317,10 +317,10 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
             (self.sukisu_patch_dir / "other/zram/lz4k/include/linux", "include/linux/"),
             (self.sukisu_patch_dir / "other/zram/lz4k/lib", "lib/"),
             (self.sukisu_patch_dir / "other/zram/lz4k/crypto", "crypto/"),
-            (self.sukisu_patch_dir / "other/zram/lz4k_oplus", "lib/"),
+            (self.sukisu_patch_dir / "other/zram/lz4k_oplus", "lib/lz4k_oplus/"),
         ]:
             if src[0].exists():
-                self._run_cmd(f"cp -r {src[0]}/* {src[1]}", check=False)
+                self._run_cmd(f"mkdir -p {src[1]} && cp -r {src[0]}/* {src[1]}", check=False)
         zram_patch_dir = self.sukisu_patch_dir / f"other/zram/zram_patch/{self.config.kernel_version}"
         for patch in ["lz4kd.patch", "lz4k_oplus.patch"]:
             p = zram_patch_dir / patch
@@ -620,7 +620,7 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
             if result.returncode == 0:
                 logger.info("=== 内核编译成功 ===")
                 return True
-            logger.error(f"内核编译失败: {result.stderr if result.stderr else 'Unknown error'}")
+            logger.error(f"内核编译失败: {result.stderr if result.stderr else f'exit code {result.returncode}'}")
             return False
         except Exception as e:
             logger.error(f"编译过程出错: {e}")
