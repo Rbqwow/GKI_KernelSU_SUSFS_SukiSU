@@ -297,8 +297,85 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
         if susfs_patch.exists():
             patch_file = common_dir / self.config.get_susfs_patch_filename()
             if patch_file.exists():
+                # SukiSU's builtin branch provides a SUSFS-aware execve ABI.
+                # SUSFS's legacy exec hunk adds a post-exec symbol that this
+                # branch does not provide.  Apply the filesystem patch and
+                # clean that ABI mismatch in the resulting source file.
+                patch_to_apply = patch_file
+                sucompat_header = self.work_dir / "KernelSU/kernel/feature/sucompat.h"
+                sucompat_source = self.work_dir / "KernelSU/kernel/feature/sucompat.c"
+                syscall_bridge = self.work_dir / "KernelSU/kernel/hook/syscall_event_bridge.c"
+                legacy_files = set()
+                postprocess_exec = False
+                sucompat_text = ""
+                if sucompat_header.exists():
+                    sucompat_text = sucompat_header.read_text(encoding="utf-8")
+                if sucompat_source.exists():
+                    sucompat_text += sucompat_source.read_text(encoding="utf-8")
+
+                # The SukiSU builtin branch already provides the SUSFS-aware
+                # execve ABI, but it has no post-exec helper.  Newer SukiSU
+                # branches also provide a syscall event bridge for the other
+                # legacy integration points.
+                has_sukisu_abi = "int ksu_handle_execveat_sucompat(int *fd" in sucompat_text
+                if has_sukisu_abi and "ksu_handle_post_execveat_sucompat" not in sucompat_text:
+                    if syscall_bridge.exists():
+                        legacy_files = {
+                            "fs/exec.c",
+                            "fs/open.c",
+                            "fs/read_write.c",
+                            "fs/stat.c",
+                            "kernel/reboot.c",
+                            "kernel/sys.c",
+                        }
+                    else:
+                        # Keep the builtin pre-exec patch and clean up its
+                        # unavailable post-exec call after patching.
+                        postprocess_exec = True
+
+                if has_sukisu_abi and legacy_files:
+                    filtered_lines = []
+                    current_file = None
+                    with open(patch_file, "r", encoding="utf-8") as patch_stream:
+                        for line in patch_stream:
+                            if line.startswith("diff --git "):
+                                current_file = line.split()[2][2:]
+                            if current_file not in legacy_files:
+                                filtered_lines.append(line)
+                    filtered_patch = common_dir / ".susfs-sukisu.patch"
+                    with open(filtered_patch, "w", encoding="utf-8") as patch_stream:
+                        patch_stream.writelines(filtered_lines)
+                    patch_to_apply = filtered_patch
+
                 self._chdir(common_dir)
-                self._run_cmd(f"patch -p1 --fuzz=3 < {patch_file}", check=False)
+                self._run_cmd(f"patch -p1 --fuzz=3 < {patch_to_apply}", check=False)
+                if patch_to_apply != patch_file:
+                    patch_to_apply.unlink(missing_ok=True)
+
+                if postprocess_exec:
+                    exec_file = common_dir / "fs/exec.c"
+                    if exec_file.exists():
+                        content = exec_file.read_text(encoding="utf-8")
+                        content = content.replace(
+                            "extern struct static_key_true ksu_su_compat_enabled;",
+                            "extern bool ksu_su_compat_enabled;",
+                        )
+                        content = content.replace(
+                            "if (static_branch_likely(&ksu_su_compat_enabled)) {",
+                            "if (ksu_su_compat_enabled) {",
+                        )
+                        content = re.sub(
+                            r"\n[ \t]*extern int ksu_handle_post_execveat_sucompat\([^;]*\);\n",
+                            "\n",
+                            content,
+                        )
+                        content = re.sub(
+                            r"\n[ \t]*if \(unlikely\(is_su_session\)\)\n[ \t]*\(void\)ksu_handle_post_execveat_sucompat\([^;\n]*\);\n",
+                            "\n\t(void)is_su_session;\n",
+                            content,
+                        )
+                        exec_file.write_text(content, encoding="utf-8")
+                        logger.info("已清理 SukiSU builtin 的 SUSFS post-exec 兼容调用")
                 self._chdir(self.work_dir)
 
     def apply_sukisu_patches(self):
@@ -317,10 +394,10 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
             (self.sukisu_patch_dir / "other/zram/lz4k/include/linux", "include/linux/"),
             (self.sukisu_patch_dir / "other/zram/lz4k/lib", "lib/"),
             (self.sukisu_patch_dir / "other/zram/lz4k/crypto", "crypto/"),
-            (self.sukisu_patch_dir / "other/zram/lz4k_oplus", "lib/"),
+            (self.sukisu_patch_dir / "other/zram/lz4k_oplus", "lib/lz4k_oplus/"),
         ]:
             if src[0].exists():
-                self._run_cmd(f"cp -r {src[0]}/* {src[1]}", check=False)
+                self._run_cmd(f"mkdir -p {src[1]} && cp -r {src[0]}/* {src[1]}", check=False)
         zram_patch_dir = self.sukisu_patch_dir / f"other/zram/zram_patch/{self.config.kernel_version}"
         for patch in ["lz4kd.patch", "lz4k_oplus.patch"]:
             p = zram_patch_dir / patch
@@ -620,7 +697,7 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
             if result.returncode == 0:
                 logger.info("=== 内核编译成功 ===")
                 return True
-            logger.error(f"内核编译失败: {result.stderr if result.stderr else 'Unknown error'}")
+            logger.error(f"内核编译失败: {result.stderr if result.stderr else f'exit code {result.returncode}'}")
             return False
         except Exception as e:
             logger.error(f"编译过程出错: {e}")
