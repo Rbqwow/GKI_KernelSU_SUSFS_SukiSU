@@ -297,8 +297,40 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
         if susfs_patch.exists():
             patch_file = common_dir / self.config.get_susfs_patch_filename()
             if patch_file.exists():
+                # SukiSU already hooks these syscalls from its syscall event
+                # bridge.  SUSFS's legacy hunk for the same files targets the
+                # old KernelSU ABI and introduces undefined symbols such as
+                # ksu_handle_post_execveat_sucompat.  Keep SUSFS's filesystem
+                # changes while omitting only those legacy integration files.
+                patch_to_apply = patch_file
+                sucompat_header = self.work_dir / "KernelSU/kernel/feature/sucompat.h"
+                syscall_bridge = self.work_dir / "KernelSU/kernel/hook/syscall_event_bridge.c"
+                if sucompat_header.exists() and syscall_bridge.exists():
+                    legacy_files = {
+                        "fs/exec.c",
+                        "fs/open.c",
+                        "fs/read_write.c",
+                        "fs/stat.c",
+                        "kernel/reboot.c",
+                        "kernel/sys.c",
+                    }
+                    filtered_lines = []
+                    current_file = None
+                    with open(patch_file, "r", encoding="utf-8") as patch_stream:
+                        for line in patch_stream:
+                            if line.startswith("diff --git "):
+                                current_file = line.split()[2][2:]
+                            if current_file not in legacy_files:
+                                filtered_lines.append(line)
+                    filtered_patch = common_dir / ".susfs-sukisu.patch"
+                    with open(filtered_patch, "w", encoding="utf-8") as patch_stream:
+                        patch_stream.writelines(filtered_lines)
+                    patch_to_apply = filtered_patch
+
                 self._chdir(common_dir)
-                self._run_cmd(f"patch -p1 --fuzz=3 < {patch_file}", check=False)
+                self._run_cmd(f"patch -p1 --fuzz=3 < {patch_to_apply}", check=False)
+                if patch_to_apply != patch_file:
+                    patch_to_apply.unlink(missing_ok=True)
                 self._chdir(self.work_dir)
 
     def apply_sukisu_patches(self):

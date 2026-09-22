@@ -207,6 +207,9 @@ jobs:
           echo "${{ matrix.config.android }}-${{ matrix.config.kernel }}-${{ matrix.config.sub_level }}:outcome=${{ job.status }}" >> build-results/status.txt
 
       - name: Upload build results
+        # Preserve the per-matrix status file when the build command fails so
+        # the release job can publish a complete success/failure summary.
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: build-results-${{ matrix.config.android }}-${{ matrix.config.kernel }}-${{ matrix.config.sub_level }}
@@ -215,7 +218,9 @@ jobs:
 
   release:
     needs: [prepare, build]
-    if: ${{ github.event.inputs.make_release == 'true' }}
+    # A failed matrix still produces useful status artifacts.  Always run the
+    # aggregation job and gate release creation/notification on the summary.
+    if: ${{ always() && github.event.inputs.make_release == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
