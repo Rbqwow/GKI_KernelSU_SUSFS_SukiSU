@@ -263,23 +263,65 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
             return
         logger.info("=== 添加 Baseband-guard ===")
         common_dir = self.work_dir / "common"
-        if not common_dir.exists():
-            return
         self._chdir(common_dir)
-        self._run_cmd(f"wget -O- {BBG_CONFIG['setup_script']} | bash", check=False)
-        config_file = common_dir / "arch/arm64/configs/gki_defconfig"
-        if config_file.exists():
-            with open(config_file, "a") as f:
-                f.write("CONFIG_BBG=y\n")
+        setup_file = common_dir / ".bbg-setup.sh"
+        try:
+            self._run_cmd(f'curl -fLSs --retry 3 "{BBG_CONFIG["setup_script"]}" -o "{setup_file}"')
+            self._run_cmd(f'bash "{setup_file}"')
+        finally:
+            setup_file.unlink(missing_ok=True)
+        self._configure_bbg_host_tools(common_dir)
+        self._configure_bbg_lsm(common_dir)
+
+    @staticmethod
+    def _configure_bbg_host_tools(common_dir: Path):
+        """Use Android's host linker and sysroot when generating SELinux headers."""
+        makefile = common_dir / "security/baseband-guard/Makefile"
+        content = makefile.read_text(encoding="utf-8")
+        # Android supplies -fuse-ld=lld through KBUILD_HOSTLDFLAGS.
+        content = content.replace(
+            "$(HOSTCC) -I$(srctree)/scripts/selinux/genheaders",
+            "$(HOSTCC) $(KBUILD_HOSTCFLAGS) $(KBUILD_HOSTLDFLAGS) "
+            "-I$(srctree)/scripts/selinux/genheaders",
+        )
+        makefile.write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _configure_bbg_lsm(common_dir: Path):
+        """Enable BBG while preserving existing LSM order and Kconfig syntax."""
         kconfig_file = common_dir / "security/Kconfig"
-        if kconfig_file.exists():
-            with open(kconfig_file, "r") as f:
-                content = f.read()
-            content = re.sub(r'(config LSM.*?)(default .*)(\n.*?help)',
-                           lambda m: m.group(1) + ('lockdown,baseband_guard' if 'lockdown' in m.group(2) and 'baseband_guard' not in m.group(2) else m.group(2)) + m.group(3),
-                           content, flags=re.DOTALL)
-            with open(kconfig_file, "w") as f:
-                f.write(content)
+        config_file = common_dir / "arch/arm64/configs/gki_defconfig"
+        kconfig = kconfig_file.read_text(encoding="utf-8")
+        defconfig = config_file.read_text(encoding="utf-8")
+
+        def append_bbg(match):
+            lsms = match.group(2)
+            if "baseband_guard" not in lsms.split(","):
+                lsms += ("," if lsms else "") + "baseband_guard"
+            return match.group(1) + lsms + match.group(3)
+
+        # Anchor the exact symbol; LSM_MMAP_MIN_ADDR is a different block.
+        block = re.search(r"^config[ \t]+LSM[ \t]*\n.*?(?=^\S|\Z)",
+                          kconfig, flags=re.MULTILINE | re.DOTALL)
+        if block is None:
+            raise RuntimeError("Baseband-guard: config LSM block missing from security/Kconfig")
+        updated, count = re.subn(r'(^[ \t]*default[ \t]+")([^"\n]*)(")',
+                                 append_bbg, block.group(), flags=re.MULTILINE)
+        if count == 0:
+            raise RuntimeError("Baseband-guard: quoted LSM defaults missing from security/Kconfig")
+        kconfig = kconfig[:block.start()] + updated + kconfig[block.end():]
+
+        # An explicit defconfig value overrides Kconfig defaults.
+        defconfig = re.sub(r'(^CONFIG_LSM=")([^"\n]*)(")',
+                           append_bbg, defconfig, flags=re.MULTILINE)
+        defconfig, count = re.subn(r"^(?:CONFIG_BBG=[^\n]*|# CONFIG_BBG is not set)$",
+                                   "CONFIG_BBG=y", defconfig, flags=re.MULTILINE)
+        if count == 0:
+            defconfig = defconfig.rstrip("\n") + "\nCONFIG_BBG=y\n"
+
+        kconfig_file.write_text(kconfig, encoding="utf-8")
+        config_file.write_text(defconfig, encoding="utf-8")
+        logger.info("Baseband-guard 已启用，原有 LSM 列表与条件已保留")
 
     def apply_susfs_patches(self):
         logger.info("=== 应用 SUSFS 补丁 ===")
