@@ -83,7 +83,7 @@ python build.py --list-matrix
 | `--os-patch` | OS Patch Level | 2025-02 |
 | `--revision` | Android 12 Revision | - |
 | `--ksu-version` | SukiSU-Ultra 版本 (Stable/Dev) | Stable(标准) |
-| `--ksu-commit` | 指定 SukiSU-Ultra commit hash | latest |
+| `--ksu-commit` | Pin a SUSFS-compatible SukiSU commit (7-40 hex characters) | latest builtin |
 | `--susfs-commit` | 指定 SUSFS commit (hash 或 HEAD~N) | latest |
 | `--zram` | 启用 ZRAM (LZ4KD) | False |
 | `--no-kpm` | 禁用 KPM | False |
@@ -98,6 +98,12 @@ python build.py --list-matrix
 | `--list-matrix` | 列出所有预定义矩阵 | - |
 | `--dry-run` | 仅验证配置 | - |
 | `--workspace`, `-w` | 工作目录 | /tmp/gki-build |
+
+Pinned SukiSU commits must define `CONFIG_KSU_SUSFS`. Select a commit from the
+[builtin history](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commits/builtin/),
+or leave the hash empty to use the latest builtin revision. Mainline release
+commits such as `85eb4a95` require a separate SUSFS port. The build verifies the
+resolved commit and rejects incompatible sources before applying kernel patches.
 
 ---
 

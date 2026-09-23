@@ -51,7 +51,7 @@ on:
           - Dev(开发)
         default: Stable(标准)
       kernelsu_commit:
-        description: '指定 KernelSU commit hash (可选)'
+        description: 'SukiSU builtin/SUSFS 兼容 commit hash（留空使用 builtin 最新）'
         required: false
         type: string
         default: ''

@@ -247,16 +247,48 @@ CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
 
     def add_kernelsu(self):
         logger.info("=== 添加 KernelSU ===")
+        commit = (self.config.kernelsu_commit or "").strip().lower()
+        if commit and re.fullmatch(r"[0-9a-fA-F]{7,40}", commit) is None:
+            raise ValueError("SukiSU commit must be a 7-40 character hexadecimal hash")
+        ref = commit or "builtin"
         self._chdir(self.work_dir)
-        setup_url = (f"https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/{self.config.kernelsu_commit}/kernel/setup.sh"
-                    if self.config.kernelsu_commit else KSU_REPO_CONFIG["setup_script"])
-        self._run_cmd(f"curl -LSs {setup_url} | bash -s builtin", check=False)
-        if self.config.kernelsu_commit:
-            ksu_dir = self.work_dir / "KernelSU"
-            if ksu_dir.exists():
-                self._chdir(ksu_dir)
-                self._run_cmd(f"git checkout {self.config.kernelsu_commit}", check=False)
-                self._chdir(self.work_dir)
+        setup_file = self.work_dir / ".ksu-setup.sh"
+        try:
+            # Resolve abbreviated hashes through Git, using the setup entry point.
+            self._run_cmd(f'curl -fLSs --retry 3 "{KSU_REPO_CONFIG["setup_script"]}" -o "{setup_file}"')
+            self._run_cmd(f'bash "{setup_file}" "{ref}"')
+        finally:
+            setup_file.unlink(missing_ok=True)
+
+        ksu_dir = self.work_dir / "KernelSU"
+        git = f'git -C "{ksu_dir}"'
+        target = commit or "refs/remotes/origin/builtin"
+        expected = self._run_cmd(f'{git} rev-parse --verify "{target}^{{commit}}"',
+                                 capture_output=True).stdout.strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40}", expected) is None:
+            raise RuntimeError(f"Invalid resolved SukiSU commit for {ref}: {expected}")
+        # setup.sh can swallow checkout errors; require the requested revision.
+        self._run_cmd(f'{git} checkout --detach "{expected}"')
+        actual = self._run_cmd(f"{git} rev-parse HEAD", capture_output=True).stdout.strip()
+        if actual != expected:
+            raise RuntimeError(f"SukiSU revision mismatch: requested {ref}, resolved {expected}, HEAD {actual}")
+        logger.info("SukiSU commit: %s (requested %s)", actual, ref)
+        self._validate_kernelsu_susfs(ksu_dir, actual)
+
+    @staticmethod
+    def _validate_kernelsu_susfs(ksu_dir: Path, commit: str):
+        """Require native SUSFS integration before applying GKI hooks."""
+        try:
+            kconfig = (ksu_dir / "kernel/Kconfig").read_text(encoding="utf-8")
+        except OSError as error:
+            raise RuntimeError(f"SukiSU commit {commit}: kernel/Kconfig is unavailable after setup") from error
+        if re.search(r"^\s*(?:menu)?config\s+KSU_SUSFS\s*$", kconfig, re.MULTILINE) is None:
+            raise RuntimeError(
+                f"SukiSU commit {commit} lacks CONFIG_KSU_SUSFS. "
+                "This build requires SUSFS-integrated sources. Choose a compatible commit "
+                "from https://github.com/SukiSU-Ultra/SukiSU-Ultra/commits/builtin/ "
+                "or leave kernelsu_commit empty to use the builtin branch."
+            )
 
     def add_bbg(self):
         if not self.config.use_bbg:
